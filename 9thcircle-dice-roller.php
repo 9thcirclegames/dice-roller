@@ -30,23 +30,147 @@ Author URI: http://9thcircle.it
 namespace C9\WP_PLUGINS;
 
 
-class DiceRoller
+
+/**
+ *	\brief		Extended by the akk classes that implement a generic feature (example: Dice Rolls).
+ *
+ */
+class Commons
 {
+	// DB
+	
 	//! Version of this plugin's tables structure.
 	const DB_VERSION  = '0.1';
-	//! All tables created by this plugin use this prefix. A sort of SQL schema, or namespace.
-	const TAB_PREFIX  = 'pbf_';
+	//! All options and tables created by this plugin use this prefix.
+	//!	It's a sort of namespace, or SQL schema.
+	const PREFIX      = 'pbf_';
 	
 	
 	
+	// props
+	
+	//! Names of active Components (must be their main class).
+	//! This is an ordered array: Components will be installed in its order,
+	//! and uninstalled in reverse order.
+	private   static /*. string[int] .*/  $components    = array('Campaign', 'DiceRoller');
 	//! Name of campaign table.
-	private static /*. string .*/  $tabCampaign   = '';
+	protected static /*. string .*/       $tabCampaign   = '';
 	//! Name of dice roll table.
-	private static /*. string .*/  $tabRoll       = '';
+	protected static /*. string .*/       $tabRoll       = '';
 	//! DB connection object.
-	private static /*. wpdb .*/    $wpdb          = NULL;
+	protected static /*. wpdb .*/         $wpdb          = NULL;
+	
+	
+	
+	
+	/**
+	 *	\brief		If self::$wpdb is not set still, copies global $wpdb variable and prefix 
+	 *				into class hidden properties.
+	 *	@return		void
+	 */
+	final protected static function get_wpdb()
+	{
+		global $wpdb;
+		
+		if (is_object(self::$wpdb) !== TRUE) {
+			self::$wpdb          = $wpdb;
+			self::$tabCampaign   = $wpdb->prefix . self::PREFIX . 'campaign';
+			self::$tabRoll       = $wpdb->prefix . self::PREFIX . 'dice_roll';
+		}
+	}
+	
+	/**
+	 *	\brief		Called on plugin activation (install).
+	 *				Creates all plugin tables and set options.
+	 *	@return		void
+	 */
+	final public static function handleActivation()
+	{
+		// set generic options
+		
+		update_option(  self::PREFIX . 'db_version',      self::DB_VERSION);
+		
+		//db info
+		
+		$installed_ver = get_option(self::PREFIX . 'db_version');
+		require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+		self::get_wpdb();
+		
+		// install plugins
+		
+		$numComponents = count(self::$components);
+		for ($i = 0; $i < $numComponents; $i++) {
+			// get actions to be executed
+			$actions = call_user_func('C9\\WP_PLUGINS\\' . self::$components[$i] . '::getInstallActions');
+			
+			$numActions = count($actions);
+			for ($j = 0; $j < $numActions; $j++) {
+				$curAction = $actions[$j];
+				if ($curAction['type'] === 'sql-install') {
+					dbDelta($curAction['value']);
+				} elseif ($curAction['type'] === 'option') {
+					add_option($curAction['name'], $curAction['value']);
+				} elseif ($curAction['type'] === 'sql-uninstall') { } 
+				  else {
+					trigger_error('Component ' . self::$components[$i] . ' required an install action of an unknown type: ' . $curAction['type']);
+				}
+			}
+		}
+		
+		## DBUG This is here for debug, until we implement campaign management!
+		$sql = "INSERT INTO " . self::$tabCampaign . " (`id`, `campaign_name`, `campaign_description`, `campaign_active`) VALUES (1, 'Test Campaign', 'Let\'s test the Dice Roller!!!', '1');";
+		dbDelta($sql);
+	}
+	
+	/**
+	 *	\brief		Called on plugin de-activation (uninstall).
+	 *				Drops all plugin tables and options.
+	 *	@return		void
+	 */
+	final public static function handleDeactivation()
+	{
+		// DB info
+		
+		require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
+		self::get_wpdb();
+		
+		// remove options
+		
+		delete_option(self::PREFIX . 'db_version');
+		delete_option(self::PREFIX . 'rolls_per_page');
+	}
+	
+	/**
+	 *	\brief		Initializes plugin.
+	 *				Registers wp hooks.
+	 *	@return		void
+	 */
+	public static function init()
+	{
+		// generic hooks
+		register_activation_hook(__FILE__,        'C9\WP_PLUGINS\Commons::handleActivation');
+		register_deactivation_hook(__FILE__,      'C9\WP_PLUGINS\Commons::handleDeactivation');
+		
+		// call components initializers
+		DiceRoller::init();
+	}
+}
+
+
+
+class DiceRoller extends Commons
+{
+	// options defaults
+	
+	//!	Default value for 'rolls_per_page' option.
+	const DEFAULT_ROLLS_PER_PAGE  = 10;
+	
+	
+	
+	// props
+	
 	//! Number of rolls per page.
-	private static /*. int .*/     $rollsPerPage  = 10;
+	private static /*. int .*/     $rollsPerPage  = 0;
 	
 	
 	
@@ -77,70 +201,6 @@ class DiceRoller
 		return $out;
 	}
 	
-	public static function handleActivation()
-	{
-		$installed_ver = get_option( 'ninthcircle_dr_db_version' );
-		
-		#if($installed_ver != self::DB_VERSION) {
-		require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
-		
-		self::get_wpdb();
-		
-		/* Campaign table */
-		$sql = "CREATE TABLE " . self::$tabCampaign . " (
-		id SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT,
-		master_ID BIGINT NOT NULL,
-		campaign_name CHAR(128) NOT NULL,
-		campaign_description CHAR(255) NOT NULL,
-		campaign_url VARCHAR(400) NOT NULL,
-		campaign_active ENUM('0','1') NOT NULL,
-		campaign_start_date TIMESTAMP,
-		campaign_end_date TIMESTAMP,
-		PRIMARY KEY (id)
-		);";
-		dbDelta($sql);
-		
-		/* Roll table */
-		$sql = "CREATE TABLE " . self::$tabRoll . " (
-		id SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT,
-		roller_ID BIGINT NOT NULL,
-		campaign_ID SMALLINT NOT NULL,
-		roll_description CHAR(255),
-		roll_setup VARCHAR(25) NOT NULL,
-		roll_result SMALLINT NOT NULL,
-		roll_datetime DATETIME,
-		PRIMARY KEY (id)
-		);";
-		dbDelta($sql);
-		
-		## DBUG This is here for debug, until we implement campaign management!
-		$sql = "INSERT INTO " . self::$tabCampaign . " (`id`, `campaign_name`, `campaign_description`, `campaign_active`) VALUES (1, 'Test Campaign', 'Let\'s test the Dice Roller!!!', '1');";
-		dbDelta($sql);
-		
-		update_option( 'ninthcircle_dr_db_version', self::DB_VERSION);
-		#}
-	}
-	
-	/**
-	 *	\brief		Called on plugin de-activation.
-	 *				Drops all plugin tables.
-	 *	@return		void
-	 */
-	public static function handleDeactivation()
-	{
-		require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
-		
-		self::get_wpdb();
-		
-		/* Campaign table */
-		$sql = 'DROP TABLE IF EXISTS ' . self::$tabCampaign . ';';	
-		dbDelta($sql);
-		
-		/* Roll table */
-		$sql = 'DROP TABLE IF EXISTS ' . self::$tabRoll . ';';	
-		dbDelta($sql);
-	}
-	
 	public static function mainPage()
 	{
 		self::get_wpdb();
@@ -150,49 +210,46 @@ class DiceRoller
 			self::roll();
 		}
 		self::form();
-		self::printRolls(self::$rollsPerPage);
+		self::printRolls();
 		echo '</div>';
 	}
 	
 	private static function roll()
 	{
-		$N = (int)$_REQUEST['N'];
-		$X = (int)$_REQUEST['X'];
-		$M = (int)$_REQUEST['M'];
+		$dices   = (int)$_REQUEST['N'];  // number of dices to be rolled
+		$faces   = (int)$_REQUEST['X'];  // faces of dices
+		$result  = (int)$_REQUEST['M'];  // bonus/malus (initial value)
 		
-		$roll_setup = $_REQUEST['N'] . "d" . $_REQUEST['X'] . ($M != 0 ? $_REQUEST['M'] : '');
-
-	$time = date("Y-m-d H:m:s");
+		$rollSetup = $_REQUEST['N'] . "d" . $_REQUEST['X'] . ($_REQUEST['M'] === '0' ? '' : $_REQUEST['M']);
 		
-			$result=0;
-			for($i = 0; $i < $N; $i++){
-				$result += rand(1,$X);
-			}
-			$result += $M;
-			//$result = rand($N,$N*$X)+$M;
+		while ($dices > 0) {
+			$result += mt_rand(1, $faces);
+			$dices--;
+		}
 		
 		$data = array(
 			'roller_ID'         => get_current_user_id(),
 			'campaign_ID'       => $_REQUEST['roll_campaign'],
 			'roll_description'  => $_REQUEST['roll_description'],
-			'roll_setup'        => $roll_setup,
+			'roll_setup'        => $rollSetup,
 			'roll_result'       => $result,
-			'roll_datetime'     => $time
+			'roll_datetime'     => date('Y-m-d H:m:s')
 			);
 		
 		self::$wpdb->insert( self::$tabRoll, $data );
-
-		if(self::$wpdb->insert_id != false) {
+		
+		if(self::$wpdb->insert_id !== FALSE) {
 			echo '<div class="updated">';
 			_e('Roll done!', 'dice-roller');
 			echo '<br />';
-			printf(__('Result: %s = %d', 'dice-roller'), $roll_setup, $result );
+			printf(__('Result: %s = %d', 'dice-roller'), $rollSetup, $result );
 			echo '</div>';
-		} else echo '<div class="error">' . _e('Error in updating roll table', 'dice-roller') . '</div>';
-
+		} else {
+			echo '<div class="error">' . __('Error in updating roll table', 'dice-roller') . '</div>';
+		}
 	}
 
-	private static function printRolls($num)
+	private static function printRolls()
 	{
 			$orderby      = array_key_exists('orderby', $_GET) === TRUE ? $_GET['orderby'] : 'r.id DESC';
 			
@@ -214,14 +271,14 @@ class DiceRoller
 			
 			?>
 			<div class="diceroller-element" id="latest">
-			<h3 class="diceroller-init"><?php printf(__('Latest %d rolls', 'dice-roller'), $num); ?></h3>
+			<h3 class="diceroller-init"><?php printf(__('Latest %d rolls', 'dice-roller'), self::$rollsPerPage); ?></h3>
 			<div class="diceroller-container">
 			<table class="widefat">
 			<thead>
 			<tr>
 				<th><a href="<?php echo $baseURL; ?>&orderby=roller_ID"><?php _e('User', 'dice-roller'); ?></a></th>
 				<th><a href="<?php echo $baseURL; ?>&orderby=campaign_name"><?php _e('Campaign Name', 'dice-roller'); ?></a></th>
-				<th><a href="<?php echo $baseURL; ?>&orderby=roll_setup"><?php _e('Setup', 'dice-roller'); ?></a></th>
+				<th><a href="<?php echo $baseURL; ?>&orderby=roll_setup" class="c9-nobr"><?php _e('Setup', 'dice-roller'); ?></a></th>
 				<th><a href="<?php echo $baseURL; ?>&orderby=roll_description"><?php _e('Description', 'dice-roller'); ?></a></th>
 				<th><a href="<?php echo $baseURL; ?>&orderby=roll_result"><?php _e('Result', 'dice-roller'); ?></a></th>
 				<th><a href="<?php echo $baseURL; ?>&orderby=roll_datetime"><?php _e('Executed at', 'dice-roller'); ?></a></th>
@@ -351,7 +408,7 @@ class DiceRoller
 	
 	public static function handleAdminInit()
 	{
-		wp_register_style( 'ninthcircle_dr_style', WP_PLUGIN_URL . '/9thcircle_dice_roller/screen.css' );
+		wp_register_style('ninthcircle_dr_style', WP_PLUGIN_URL . '/9thcircle_dice_roller/screen.css');
 	}
 	
 	public static function handleAdminMenu()
@@ -374,7 +431,7 @@ class DiceRoller
 	 */
 	public static function handleAdminStyles()
 	{
-		   wp_enqueue_style( 'ninthcircle_dr_style' );
+		   wp_enqueue_style('ninthcircle_dr_style');
 	}
 	   
 	public static function handleLatestShortcode($atts)
@@ -382,7 +439,7 @@ class DiceRoller
 			self::get_wpdb();
 			
 			extract(shortcode_atts(array(
-					'num'    => 10,
+					'count'    => self::$rollsPerPage,
 					'class'  => '',
 				), $atts));
 			
@@ -391,7 +448,7 @@ class DiceRoller
 				FROM ' . self::$tabRoll . ' r INNER JOIN ' . self::$tabCampaign . ' c 
 				ON r.campaign_ID = c.id 
 				ORDER BY r.id DESC
-				LIMIT 0, ' . $num . ';';
+				LIMIT 0, ' . $count . ';';
 			$latest_rolls = self::$wpdb->get_results($query, OBJECT);
 			
 			?>
@@ -423,38 +480,94 @@ class DiceRoller
 	}
 	
 	/**
-	 *	\brief		If self::$wpdb is not set still, copies global $wpdb variable and prefix 
-	 *				into class private properties.
-	 *	@return		void
+	 *	\brief		Returns required to install/uninstall this component.
+	 *	@return		array
 	 */
-	private static function get_wpdb()
+	public static function getInstallActions()
 	{
-		global $wpdb;
-		
-		if (is_object(self::$wpdb) !== TRUE) {
-			self::$wpdb          = $wpdb;
-			self::$tabCampaign   = $wpdb->prefix . self::TAB_PREFIX . 'campaign';
-			self::$tabRoll       = $wpdb->prefix . self::TAB_PREFIX . 'dice_roll';
-		}
+		return array(
+				0 => array(
+						'type'   => 'sql-install',
+						'value'  => 
+							'CREATE TABLE ' . self::$tabRoll . ' (
+							id SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT,
+							roller_ID BIGINT NOT NULL,
+							campaign_ID SMALLINT NOT NULL,
+							roll_description CHAR(255),
+							roll_setup VARCHAR(25) NOT NULL,
+							roll_result SMALLINT NOT NULL,
+							roll_datetime DATETIME,
+							PRIMARY KEY (id)
+							);'
+					),
+				1 => array(
+						'type'   => 'sql-uninstall',
+						'value'  => 'DROP TABLE IF EXISTS ' . self::$tabRoll . ';'
+					),
+				2 => array(
+						'type'   => 'option',
+						'name'   => 'rolls_per_page',
+						'value'  => DiceRoller::DEFAULT_ROLLS_PER_PAGE
+					)
+			);
 	}
 	
 	/**
-	 *	\brief		Initializes plugin.
-	 *				Registers wp hooks.
+	 *	\brief		Initializes Dice Roller part of the plugin.
 	 *	@return		void
 	 */
 	public static function init()
 	{
-		register_activation_hook(__FILE__,        'C9\WP_PLUGINS\DiceRoller::handleActivation');
-		register_deactivation_hook(__FILE__,      'C9\WP_PLUGINS\DiceRoller::handleDeactivation');
+		// get options or defaults
+		self::$rollsPerPage = get_option(self::PREFIX . 'rolls_per_page', self::DEFAULT_ROLLS_PER_PAGE);
+		
+		// DiceRoll hooks
 		add_action('admin_menu',                  'C9\WP_PLUGINS\DiceRoller::handleAdminMenu');
 		add_action('admin_init',                  'C9\WP_PLUGINS\DiceRoller::handleAdminInit');
-		add_shortcode('ninthcircle_latest_roll',  'C9\WP_PLUGINS\DiceRoller::handleLatestShortcode');
+		add_shortcode('c9_dice_rolls',            'C9\WP_PLUGINS\DiceRoller::handleLatestShortcode');
 	}
 }
 
 
-// pass needed wp vars
-DiceRoller::init();
+
+/*
+ *	\brief		Component for Campaign management.
+ */
+class Campaign extends Commons
+{
+	/**
+	 *	\brief		Returns required to install/uninstall this component.
+	 *	@return		array
+	 */
+	public static function getInstallActions()
+	{
+		return array(
+				0 => array(
+					'type'   => 'sql-install',
+					'value'  => 
+						'CREATE TABLE ' . self::$tabCampaign . ' (
+						id SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT,
+						master_ID BIGINT NOT NULL,
+						campaign_name CHAR(128) NOT NULL,
+						campaign_description CHAR(255) NOT NULL,
+						campaign_url VARCHAR(400) NOT NULL,
+						campaign_active ENUM(\'0\',\'1\') NOT NULL,
+						campaign_start_date TIMESTAMP,
+						campaign_end_date TIMESTAMP,
+						PRIMARY KEY (id)
+						);'
+					),
+				1 => array(
+						'type'   => 'sql-uninstall',
+						'value'  => 'DROP TABLE IF EXISTS ' . self::$tabCampaign . ';'
+					)
+			);
+	}
+}
+
+
+
+// init plugin and components
+Commons::init();
 
 ?>
