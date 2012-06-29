@@ -31,9 +31,16 @@ namespace C9\WP_PLUGINS;
 
 
 
+// include needed core files
+require_once __DIR__ . '/libs/exceptions.php';  // custom exceptions
+require_once __DIR__ . '/libs/types.php';       // generic types for static analysis
+require_once __DIR__ . '/libs/types_c9.php';    // C9 types for static analysis
+
+
+
+
 /**
  *	\brief		Extended by the akk classes that implement a generic feature (example: Dice Rolls).
- *
  */
 class Commons
 {
@@ -53,8 +60,8 @@ class Commons
 	//! This is an ordered array: Components will be installed in its order,
 	//! and uninstalled in reverse order.
 	private   static /*. string[int] .*/  $components    = array('Campaign', 'DiceRoller');
-	//! Name of campaign table.
-	protected static /*. string .*/       $tabCampaign   = '';
+	//! Names of SQL Tables.
+	protected static /*. string[int] .*/  $SQLTables     = array();
 	//! Name of dice roll table.
 	protected static /*. string .*/       $tabRoll       = '';
 	//! DB connection object.
@@ -64,18 +71,56 @@ class Commons
 	
 	
 	/**
-	 *	\brief		If self::$wpdb is not set still, copies global $wpdb variable and prefix 
-	 *				into class hidden properties.
+	 *	\brief		Registers info about a SQL Table, so it can be used in the future
+	 *				without hardcoding it.
 	 *	@return		void
 	 */
-	final protected static function get_wpdb()
+	final protected static function registerSQLTable($name)
+	{
+		if (in_array($name, self::$SQLTables) === FALSE) {
+			self::$SQLTables[$name] = self::$wpdb->prefix . self::PREFIX . $name;
+		} else {
+			throw new \C9\C9Exception('C9 Component Manager', 'SQL Table already registered: ' . $name);
+		}
+	}
+	
+	/**
+	 *	\brief		Returns a SQL table name, with the wp prefix and the plugin prefix.
+	 *	@return		string
+	 */
+	final protected static function getSQLTableName($name)
+	{
+		try {
+			return self::$SQLTables[$name];
+		}
+		catch (Exception $e) {
+			throw new \C9\C9Exception('C9 Component Manager', 'SQL Table not (yet?) registered: ' . $name);
+		}
+	}
+	
+	/**
+	 *	\brief		Gets from the environment and the Components all info needed to use DB.
+	 *	@return		void
+	 */
+	final protected static function setDBInfo()
 	{
 		global $wpdb;
 		
+		$tables = array();
+		
 		if (is_object(self::$wpdb) !== TRUE) {
-			self::$wpdb          = $wpdb;
-			self::$tabCampaign   = $wpdb->prefix . self::PREFIX . 'campaign';
-			self::$tabRoll       = $wpdb->prefix . self::PREFIX . 'dice_roll';
+			self::$wpdb = $wpdb;
+			
+			#self::registerSQLTable('campaign');
+			#self::registerSQLTable('dice_roll');
+			
+			// register Components' SQL tables
+			foreach (self::$components as $comp) {
+				$tables = call_user_func('C9\\WP_PLUGINS\\' . $comp . '::getDeclaredSQLTables');
+				foreach ($tables as $tab) {
+					self::registerSQLTable($tab);
+				}
+			}
 		}
 	}
 	
@@ -94,9 +139,9 @@ class Commons
 		
 		$installed_ver = get_option(self::PREFIX . 'db_version');
 		require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
-		self::get_wpdb();
+		self::setDBInfo();
 		
-		// install plugins
+		// install Components
 		
 		$numComponents = count(self::$components);
 		for ($i = 0; $i < $numComponents; $i++) {
@@ -112,14 +157,10 @@ class Commons
 					add_option($curAction['name'], $curAction['value']);
 				} elseif ($curAction['type'] === 'sql-uninstall') { } 
 				  else {
-					trigger_error('Component ' . self::$components[$i] . ' required an install action of an unknown type: ' . $curAction['type']);
+					throw new \C9\C9Exception('C9 Plugin Manager', 'Component ' . self::$components[$i] . ' required an install action of an unknown type: ' . $curAction['type']);
 				}
 			}
 		}
-		
-		## DBUG This is here for debug, until we implement campaign management!
-		$sql = "INSERT INTO " . self::$tabCampaign . " (`id`, `campaign_name`, `campaign_description`, `campaign_active`) VALUES (1, 'Test Campaign', 'Let\'s test the Dice Roller!!!', '1');";
-		dbDelta($sql);
 	}
 	
 	/**
@@ -127,14 +168,35 @@ class Commons
 	 *				Drops all plugin tables and options.
 	 *	@return		void
 	 */
-	final public static function handleDeactivation()
+	final public static function handleUninstall()
 	{
 		// DB info
 		
 		require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
-		self::get_wpdb();
+		self::setDBInfo();
 		
-		// remove options
+		// uninstall Components
+		
+		$numComponents = count(self::$components);
+		for ($i = 0; $i < $numComponents; $i++) {
+			// get actions to be executed
+			$actions = call_user_func('C9\\WP_PLUGINS\\' . self::$components[$i] . '::getInstallActions');
+			
+			$numActions = count($actions);
+			for ($j = 0; $j < $numActions; $j++) {
+				$curAction = $actions[$j];
+				if ($curAction['type'] === 'sql-uninstall') {
+					dbDelta($curAction['value']);
+				} elseif ($curAction['type'] === 'option') {
+					delete_option($curAction['name']);
+				} elseif ($curAction['type'] === 'sql-install') { } 
+				  else {
+					throw new \C9\C9Exception('C9 Plugin Manager', self::$components[$i] . ' required an uninstall action of an unknown type: ' . $curAction['type']);
+				}
+			}
+		}
+		
+		// remove plugin options
 		
 		delete_option(self::PREFIX . 'db_version');
 		delete_option(self::PREFIX . 'rolls_per_page');
@@ -148,32 +210,32 @@ class Commons
 	public static function init()
 	{
 		// generic hooks
-		register_activation_hook(__FILE__,        'C9\WP_PLUGINS\Commons::handleActivation');
-		register_deactivation_hook(__FILE__,      'C9\WP_PLUGINS\Commons::handleDeactivation');
+		register_activation_hook(__FILE__,  'C9\\WP_PLUGINS\\Commons::handleActivation');
+		register_uninstall_hook(__FILE__,   'C9\\WP_PLUGINS\\Commons::handleUninstall');
+		
+		$numComponents = count(self::$components);
+		for ($i = 0; $i < $numComponents; $i++) {
+			// get actions to be executed
+			$actions = call_user_func('C9\\WP_PLUGINS\\' . self::$components[$i] . '::getInitActions');
+			
+			$numActions = count($actions);
+			for ($j = 0; $j < $numActions; $j++) {
+				$curAction = $actions[$j];
+				if ($curAction['type'] === 'action') {
+					add_action($curAction['key'], $curAction['value']);
+				} elseif ($curAction['type'] === 'shortcode') {
+					add_shortcode($curAction['key'], $curAction['value']);
+				} else {
+					throw new \C9\C9Exception('C9 Plugin Manager', 'Component ' . self::$components[$i] . ' required an init action of an unknown type: ' . $curAction['type']);
+				}
+			}
+		}
 		
 		// call components initializers
-		DiceRoller::init();
+		foreach (self::$components as $cName) {
+			call_user_func('C9\\WP_PLUGINS\\' . $cName . '::init');
+		}
 	}
-}
-
-
-
-class DiceRoller extends Commons
-{
-	// options defaults
-	
-	//!	Default value for 'rolls_per_page' option.
-	const DEFAULT_ROLLS_PER_PAGE  = 10;
-	
-	
-	
-	// props
-	
-	//! Number of rolls per page.
-	private static /*. int .*/     $rollsPerPage  = 0;
-	
-	
-	
 	
 	/**
 	 *	\brief		Returns a querystring identical to the old one.
@@ -181,7 +243,7 @@ class DiceRoller extends Commons
 	 *	@param		string[]		$skipValues			Values to exlude.
 	 *	@return		string
 	 */
-	private static function rebuildQueryString($skipValues)
+	final protected static function rebuildQueryString($skipValues)
 	{
 		$out = '';
 		$old = explode('&', $_SERVER['QUERY_STRING']);
@@ -201,9 +263,95 @@ class DiceRoller extends Commons
 		return $out;
 	}
 	
+	/**
+	 *	\brief		Error if you try to instantiate static class.
+	 *	@return		void
+	 */
+	final public function __construct()
+	{
+		throw new \C9\C9Exception('Class is static and can not be instantiated: ' . __CLASS__);
+	}
+}
+
+
+
+/**
+ *	\interface		iComponent
+ *	\brief			All Component's MUST implement this interface.
+ */
+interface iComponent
+{
+	//! Version of this interface.
+	const API_VERSION  = '0.1';
+	
+	
+	/**
+	 *	\brief		Returns names of SQL Tables used by the Component.
+	 *	@return		string[]
+	 */
+	public static function getDeclaredSQLTables();
+	
+	/**
+	 *	\brief		Returns actions required to install/uninstall the Component.
+	 *	@return		array
+	 */
+	public static function getInstallActions();
+	
+	/**
+	 *	\brief		Returns actions required to initialize the Component.
+	 *	@return		array
+	 */
+	public static function getInitActions();
+	
+	/**
+	 *	\brief		Executes actions required to initialize the Component, or does nothing.
+	 *				For example, this can be used to set class properties.
+	 *	@return		void
+	 */
+	public static function init();
+	
+	/**
+	 *	\brief		Returns Component's version.
+	 *				There is no way to require this, but please, add a COMPONENT_VERSION constant.
+	 *	@return		string
+	 */
+	public static function getVersion();
+}
+
+
+
+class DiceRoller
+	extends Commons
+	implements iComponent
+{
+	//!	This Component's version.
+	const COMPONENT_VERSION  = '0.1';
+	
+	//!	Default value for 'rolls_per_page' option.
+	const DEFAULT_ROLLS_PER_PAGE  = 10;
+	
+	
+	
+	// props
+	
+	//! Number of rolls per page.
+	private static /*. int .*/     $rollsPerPage  = 0;
+	
+	
+	
+	
+	/**
+	 *	\brief		See iComponent.
+	 *	@return		string
+	 */
+	public static function getVersion()
+	{
+		return self::COMPONENT_VERSION;
+	}
+	
 	public static function mainPage()
 	{
-		self::get_wpdb();
+		self::setDBInfo();
 		
 		echo '<div class="wrap"><h2>' . __("9th Circle Games Dice Roller", 'dice-roller') . '</h2>';
 		if ($_REQUEST['submit']) {
@@ -236,7 +384,7 @@ class DiceRoller extends Commons
 			'roll_datetime'     => date('Y-m-d H:m:s')
 			);
 		
-		self::$wpdb->insert( self::$tabRoll, $data );
+		self::$wpdb->insert(self::getSQLTableName('dice_roll'), $data);
 		
 		if(self::$wpdb->insert_id !== FALSE) {
 			echo '<div class="updated">';
@@ -262,7 +410,7 @@ class DiceRoller extends Commons
 			$query        = '
 			SELECT SQL_CALC_FOUND_ROWS  
 				r.roller_ID, c.campaign_name, r.roll_description, r.roll_setup, r.roll_result, r.roll_datetime, c.campaign_name
-				FROM ' . self::$tabRoll . ' r INNER JOIN ' . self::$tabCampaign . ' c ON r.campaign_ID = c.id 
+				FROM ' . self::getSQLTableName('dice_roll') . ' r INNER JOIN ' . self::getSQLTableName('campaign') . ' c ON r.campaign_ID = c.id 
 				ORDER BY ' . $orderby . '
 				LIMIT ' . self::$rollsPerPage . ' OFFSET ' . (string)$limitOffset . ';';
 			$result = self::$wpdb->get_results($query, OBJECT);
@@ -349,7 +497,7 @@ class DiceRoller extends Commons
 			$instance   = wp_parse_args( $_REQUEST, $defaults );
 			$query      = '
 				SELECT id, campaign_name 
-					FROM ' . self::$tabCampaign . "
+					FROM ' . self::getSQLTableName('campaign') . "
 					WHERE campaign_active = '1';";
 			
 			$campaigns = self::$wpdb->get_results($query, OBJECT);
@@ -419,10 +567,10 @@ class DiceRoller extends Commons
 					__('Dice Roller', 'dice-roller'),
 					7,
 					__FILE__,
-					'C9\WP_PLUGINS\DiceRoller::mainPage'
+					'C9\\WP_PLUGINS\\DiceRoller::mainPage'
 				);
 		}
-		add_action( 'admin_print_styles' . $page, 'C9\WP_PLUGINS\DiceRoller::handleAdminStyles' );	
+		add_action( 'admin_print_styles' . $page, 'C9\\WP_PLUGINS\\DiceRoller::handleAdminStyles' );	
 	}
 	
 	/**
@@ -433,10 +581,10 @@ class DiceRoller extends Commons
 	{
 		   wp_enqueue_style('ninthcircle_dr_style');
 	}
-	   
+	
 	public static function handleLatestShortcode($atts)
 	{
-			self::get_wpdb();
+			self::setDBInfo();
 			
 			extract(shortcode_atts(array(
 					'count'    => self::$rollsPerPage,
@@ -445,7 +593,7 @@ class DiceRoller extends Commons
 			
 			$query = '
 				SELECT c.campaign_name, c.campaign_url, r.roll_description, r.roll_setup, r.roll_result, r.roll_datetime, c.campaign_name  
-				FROM ' . self::$tabRoll . ' r INNER JOIN ' . self::$tabCampaign . ' c 
+				FROM ' . self::getSQLTableName('dice_roll') . ' r INNER JOIN ' . self::getSQLTableName('campaign') . ' c 
 				ON r.campaign_ID = c.id 
 				ORDER BY r.id DESC
 				LIMIT 0, ' . $count . ';';
@@ -480,7 +628,7 @@ class DiceRoller extends Commons
 	}
 	
 	/**
-	 *	\brief		Returns required to install/uninstall this component.
+	 *	\brief		See iComponent.
 	 *	@return		array
 	 */
 	public static function getInstallActions()
@@ -489,7 +637,7 @@ class DiceRoller extends Commons
 				0 => array(
 						'type'   => 'sql-install',
 						'value'  => 
-							'CREATE TABLE ' . self::$tabRoll . ' (
+							'CREATE TABLE ' . self::getSQLTableName('dice_roll') . ' (
 							id SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT,
 							roller_ID BIGINT NOT NULL,
 							campaign_ID SMALLINT NOT NULL,
@@ -502,7 +650,7 @@ class DiceRoller extends Commons
 					),
 				1 => array(
 						'type'   => 'sql-uninstall',
-						'value'  => 'DROP TABLE IF EXISTS ' . self::$tabRoll . ';'
+						'value'  => 'DROP TABLE IF EXISTS ' . self::getSQLTableName('dice_roll') . ';'
 					),
 				2 => array(
 						'type'   => 'option',
@@ -513,18 +661,46 @@ class DiceRoller extends Commons
 	}
 	
 	/**
-	 *	\brief		Initializes Dice Roller part of the plugin.
+	 *	\brief		See iComponent.
+	 *	@return		array
+	 */
+	public static function getInitActions()
+	{
+		return array(
+				0 => array(
+						'type'      => 'action',
+						'key'       => 'admin_menu',
+						'value'     => 'C9\\WP_PLUGINS\\DiceRoller::handleAdminMenu'
+					),
+				1 => array(
+						'type'      => 'action',
+						'key'       => 'admin_init',
+						'value'     => 'C9\\WP_PLUGINS\\DiceRoller::handleAdminInit'
+					),
+				2 => array(
+						'type'      => 'shortcode',
+						'key'       => 'c9_dice_rolls',
+						'value'     => 'C9\\WP_PLUGINS\\DiceRoller::handleLatestShortcode'
+					)
+			);
+	}
+	
+	/**
+	 *	\brief		Gets options or defaults.
 	 *	@return		void
 	 */
 	public static function init()
 	{
-		// get options or defaults
 		self::$rollsPerPage = get_option(self::PREFIX . 'rolls_per_page', self::DEFAULT_ROLLS_PER_PAGE);
-		
-		// DiceRoll hooks
-		add_action('admin_menu',                  'C9\WP_PLUGINS\DiceRoller::handleAdminMenu');
-		add_action('admin_init',                  'C9\WP_PLUGINS\DiceRoller::handleAdminInit');
-		add_shortcode('c9_dice_rolls',            'C9\WP_PLUGINS\DiceRoller::handleLatestShortcode');
+	}
+	
+	/**
+	 *	\brief		See iComponent.
+	 *	@return		string[]
+	 */
+	public static function getDeclaredSQLTables()
+	{
+		return array('dice_roll');
 	}
 }
 
@@ -533,10 +709,24 @@ class DiceRoller extends Commons
 /*
  *	\brief		Component for Campaign management.
  */
-class Campaign extends Commons
+class Campaign
+	extends Commons
+	implements iComponent
 {
+	const COMPONENT_VERSION  = '0.2';
+	
+	
 	/**
-	 *	\brief		Returns required to install/uninstall this component.
+	 *	\brief		See iComponent.
+	 *	@return		string
+	 */
+	public static function getVersion()
+	{
+		return self::COMPONENT_VERSION;
+	}
+	
+	/**
+	 *	\brief		See iComponent.
 	 *	@return		array
 	 */
 	public static function getInstallActions()
@@ -545,7 +735,7 @@ class Campaign extends Commons
 				0 => array(
 					'type'   => 'sql-install',
 					'value'  => 
-						'CREATE TABLE ' . self::$tabCampaign . ' (
+						'CREATE TABLE ' . self::getSQLTableName('campaign') . ' (
 						id SMALLINT UNSIGNED NOT NULL AUTO_INCREMENT,
 						master_ID BIGINT NOT NULL,
 						campaign_name CHAR(128) NOT NULL,
@@ -559,9 +749,47 @@ class Campaign extends Commons
 					),
 				1 => array(
 						'type'   => 'sql-uninstall',
-						'value'  => 'DROP TABLE IF EXISTS ' . self::$tabCampaign . ';'
+						'value'  => 'DROP TABLE IF EXISTS ' . self::getSQLTableName('campaign') . ';'
+					),
+				
+				## DBUG
+				2 => array(
+						'type'   => 'sql-install',
+						'value'  => "INSERT INTO 9th_pbf_campaign (`id`, `campaign_name`, `campaign_description`, `campaign_active`) VALUES (1, 'Le montagne della follia', 'Let\'s test the Dice Roller!!!', '1');"
+					),
+				3 => array(
+						'type'   => 'sql-install',
+						'value'  => "INSERT INTO 9th_pbf_campaign (`id`, `campaign_name`, `campaign_description`, `campaign_active`) VALUES (2, 'L\'ombra calata dal tempo', 'We all love rolling', '1');"
+					),
+				4 => array(
+						'type'   => 'sql-install',
+						'value'  => "INSERT INTO 9th_pbf_campaign (`id`, `campaign_name`, `campaign_description`, `campaign_active`) VALUES (3, 'NON ATTIVA', 'errore!!! non dovresti vedermi!!!', '0');"
 					)
 			);
+	}
+	
+	/**
+	 *	\brief		See iComponent.
+	 *	@return		array
+	 */
+	public static function getInitActions()
+	{
+		return array();
+	}
+	
+	/**
+	 *	\brief		Gets options or defaults.
+	 *	@return		void
+	 */
+	public static function init() { }
+	
+	/**
+	 *	\brief		See iComponent.
+	 *	@return		string[]
+	 */
+	public static function getDeclaredSQLTables()
+	{
+		return array('campaign');
 	}
 }
 
