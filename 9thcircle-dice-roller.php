@@ -40,9 +40,56 @@ require_once __DIR__ . '/libs/types_c9.php';    // C9 types for static analysis
 
 
 /**
- *	\brief		Extended by the akk classes that implement a generic feature (example: Dice Rolls).
+ *	\class		InfoComponent
+ *	\brief		Meta info about components to be loaded.
  */
-class Commons
+class InfoComponent
+{
+	//! Name of the Component.
+	private /*. string .*/  $name;
+	//! File to be included to load the Component.
+	private /*. string .*/  $file;
+	
+	
+	
+	/**
+	 *	Constructor.
+	 *	@param		string		$name		Name of the Component.
+	 *	@param		string		$file		Path + name of the (main) file to be loaded.
+	 *										If the Component uses more files, it has to include them.
+	 *	@return		void
+	 */
+	public function __construct($name, $file)
+	{
+		$this->name  = $name;
+		$this->file  = $file;
+	}
+	
+	/**
+	 *	Returns name of the Component.
+	 *	@return		string
+	 */
+	public function getName()
+	{
+		return $this->name;
+	}
+	
+	/**
+	 *	Returns path of main file of the Component.
+	 *	@return		string
+	 */
+	public function getFile()
+	{
+		return $this->file;
+	}
+}
+
+
+
+/**
+ *	\brief		Extended by all Components.
+ */
+class Component
 {
 	// DB
 	
@@ -210,8 +257,8 @@ class Commons
 	public static function init()
 	{
 		// generic hooks
-		register_activation_hook(__FILE__,  'C9\\WP_PLUGINS\\Commons::handleActivation');
-		register_uninstall_hook(__FILE__,   'C9\\WP_PLUGINS\\Commons::handleUninstall');
+		register_activation_hook(__FILE__,  'C9\\WP_PLUGINS\\Component::handleActivation');
+		register_uninstall_hook(__FILE__,   'C9\\WP_PLUGINS\\Component::handleUninstall');
 		
 		$numComponents = count(self::$components);
 		for ($i = 0; $i < $numComponents; $i++) {
@@ -321,7 +368,7 @@ interface iComponent
 
 
 class DiceRoller
-	extends Commons
+	extends Component
 	implements iComponent
 {
 	//!	This Component's version.
@@ -710,7 +757,7 @@ class DiceRoller
  *	\brief		Component for Campaign management.
  */
 class Campaign
-	extends Commons
+	extends Component
 	implements iComponent
 {
 	const COMPONENT_VERSION  = '0.2';
@@ -796,6 +843,6 @@ class Campaign
 
 
 // init plugin and components
-Commons::init();
+Component::init();
 
 ?>
